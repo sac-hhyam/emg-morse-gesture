@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+
+# EMG data files — too large for git
+records/
+*.npy
+*.npz
+*.edf
+
+# Plots and QA outputs
+*.png
+*_windows_qa*.png
+
+# IDE
+.DS_Store
+.idea/
+*.code-workspace
+
+# Credentials
+config.ini
+*.key
+wheels/

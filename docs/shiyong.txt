@@ -1,0 +1,126 @@
+一、采集并保存数据（trial 级别）
+
+python -m epstudiosdk.realtime_record_trials --config .\data\config.ini --sfreq 992
+
+按键说明：
+
+1/2/3/4 选择当前标签：up/down/left/right（内部 label_id=0/1/2/3）
+
+Space 开始/结束一个 trial（会保存一个 trial_XXXX_labelY_*.npz）
+
+Esc 退出（会停采集并收尾保存）
+
+建议采集节奏：每个动作至少 20–30 个 trial，每个 trial 1–2 秒，中间放松 1–2 秒。总量上来以后模型才稳。
+
+二、从 trial 生成训练切窗数据
+
+python build_windows_from_trials.py --in_dir .\records\session_20260320_105631 --win_sec 0.20 --step_sec 0.05
+
+
+python build_windows_from_trials_v2.py ^
+  --in_dir .\records\session_20260320_112614 ^
+  --win_sec 0.20 --step_sec 0.05 ^
+  --trim_head_sec 0.20 --trim_tail_sec 0.20 ^
+  --rms_smooth_sec 0.02 --thr_q 0.55 --active_ratio_thresh 0.65
+
+
+python inspect_trial_windows.py --session_dir .\records\session_20260319_111651
+输出会放在同目录：
+
+X_single_windows.npy 形状 [N, T, C]
+
+y_single_labels.npy 形状 [N]，值为 0..3（up/down/left/right）
+
+三、训练 4 类 CNN（得到 ckpt）
+
+python train_cnn_4actions_simple.py --data_dir .\records\session_20260320_112614 --ckpt .\cnn_0320_.pth
+
+四、上线：实时推理 → UDP → 键盘控制网页游戏
+
+
+先启动键盘映射端（建议地铁跑酷用 tap
+python emg_udp_to_arrows.py --port 5005 --mode tap --cooldown_ms 120 --debug
+>python -m epstudiosdk.realtime_decode_udp --config .\data\config.ini --ckpt .\epstudiosdk\cnn_4actions_finetuned_0313zly.pth --sfreq 1000 --ip 127.0.0.1 --port_udp 5005
+
+打开浏览器游戏，点一下游戏窗口让它获得焦点；此时收到 UDP 的 event start 就会触发一次 w/s/a/d（或你改成方向键也行）。
+
+注意两条最容易踩坑的点：
+
+采样率必须一致：你保存时 --sfreq、切窗时隐含的 sfreq、在线推理时 --sfreq 要一致，否则窗口点数和特征尺度都会错。
+
+通道顺序必须一致：训练用的通道顺序 = 在线推理堆叠 [L,C] 的顺序。你当前 realtime_waveform.py 是按 channels 列表遍历
+
+realtime_waveform
+
+，训练/在线都要保持同一顺序。
+
+补充说明：你原来的离线回放脚本 emg_replay_udp.py 已经实现了“滑窗预测→事件去抖（start/hold/end）”的思路
+
+emg_replay_udp
+
+，在线版也是同一套逻辑；游戏控制建议只用 event start 做一次 tap，避免抖动连发。
+
+
+python train_cnn_4actions_finetune.py --old_data_dir .\records\session_20260319_111651 --new_data_dir .\records
+\session_20260319_114351 --base_ckpt .\cnn_udlr_0319zly.pth --ft_ckpt_out .\cnn_udlr_0319zly_ft1.pth
+
+python train_cnn_4actions_finetune_noold.py  --new_data_dir .\records\session_20260317_154020 --base_ckpt .\cnn_4actions_emg.pth --fn_ckpt_out .\cnn_4actions_emg_new.pth
+
+
+
+
+python -m epstudiosdk.realtime_decode_udp_v2 ^
+  --ckpt .\epstudiosdk\cnn_4actions_updownleftright.pth ^
+  --sfreq 1000 ^
+  --device_mac E3:5B:D8:05:34:E9 ^
+  --channels 1,2,3,4,5 ^
+  --ip 127.0.0.1 --port_udp 5005 ^
+  --start_vote_len 2 ^
+  --switch_vote_len 2 ^
+  --min_rest_sec 0.10 ^
+  --conf_thresh 0.55
+
+
+
+python -m epstudiosdk.realtime_decode_udp_v3 ^
+  --ckpt .\epstudiosdk\cnn_0320_2.pth ^
+  --sfreq 1000 ^
+  --device_mac E3:5B:D8:05:34:E9 ^
+  --channels 1,2,3,4,5 ^
+  --ip 127.0.0.1 --port_udp 5005 ^
+  --decision_min_windows 2 ^
+  --decision_max_windows 4 ^
+  --decision_vote_ratio 0.60 ^
+  --min_rest_sec 0.10 ^
+  --conf_thresh 0.60^
+  --no_show_plot
+
+
+
+165855
+
+python build_windows_from_trials_onset.py ^
+  --in_dir .\records\session_20260320_170755 ^
+  --win_sec 0.20 --step_sec 0.05 ^
+  --trim_head_sec 0.20 --trim_tail_sec 0.20 ^
+  --rms_smooth_sec 0.02 --thr_q 0.55 ^
+  --active_ratio_thresh 0.65 ^
+  --min_active_sec 0.18 --min_gap_sec 0.08 ^
+  --onset_pos_min 0.10 --onset_pos_max 0.60
+
+python train_cnn_4actions_grouped_onset.py ^
+  --data_dirs .\records\session_20260320_170755 ^
+  --ckpt .\cnn_4actions_onset_grouped.pth
+
+
+python -m epstudiosdk.realtime_decode_udp_onsetlight ^
+  --ckpt ".\epstudiosdk\cnn_4actions_onset_grouped.pth" ^
+  --sfreq 1000 ^
+  --device_mac E3:5B:D8:05:34:E9 ^
+  --channels 1,2,3,4,5 ^
+  --ip 127.0.0.1 --port_udp 5005 ^
+  --start_vote_len 2 ^
+  --min_rest_sec 0.10 ^
+  --post_end_block_sec 0.15 ^
+  --conf_thresh 0.55 ^
+  --no_show_plot

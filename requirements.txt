@@ -1,0 +1,9 @@
+requests
+tornado
+websocket-client
+numpy
+pandas
+matplotlib
+torch
+scikit-learn
+pynput
