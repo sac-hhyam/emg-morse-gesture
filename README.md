@@ -31,20 +31,28 @@ raw sEMG (NPZ) → windowing → activity filter → X_windows.npy → CNN class
 ```bash
 pip install -r requirements.txt
 
-# 1. Window your recordings
-python epstudiosdk/build_windows_morse.py \
-  --in_dir ./epstudiosdk/records/npz-output/thumb-up-SESSION/ \
-  --win_sec 0.50 --step_sec 0.10 \
-  --thr_q 0.60 --active_ratio_thresh 0.45 \
-  --write_index
+# 1. Run windowing + training + held-out accuracy
+python -m epstudiosdk.run_morse_pipeline \
+  --session_dirs \
+    ./epstudiosdk/records/npz-output/thumb-up-SESSION/ \
+    ./epstudiosdk/records/npz-output/two-finger-SESSION/ \
+    ./epstudiosdk/records/npz-output/fist-SESSION/ \
+    ./epstudiosdk/records/npz-output/rest-SESSION/ \
+  --ckpt ./epstudiosdk/cnn_morse.pth
 
-# 2. Verify windows
+# 2. Verify windows visually
 python epstudiosdk/inspect_trial_windows_v3.py \
   --session_dir ./epstudiosdk/records/npz-output/thumb-up-SESSION/
 
-# 3. Train classifier
-python epstudiosdk/train_cnn_4actions_simple.py
+# 3. Optional trial-level evaluation on a held-out session
+python -m epstudiosdk.offline_eval_trials \
+  --session_dir ./epstudiosdk/records/npz-output/thumb-up-HELDOUT/ \
+  --ckpt ./epstudiosdk/cnn_morse.pth \
+  --win_sec 0.50 --step_sec 0.10
 ```
+
+The pipeline writes `cnn_morse.metrics.json` with validation/test accuracy,
+confusion matrix, and per-class precision/recall/F1.
 
 ## Windowing Parameters
 
@@ -61,6 +69,7 @@ python epstudiosdk/train_cnn_4actions_simple.py
 ```
 epstudiosdk/
 ├── build_windows_morse.py        # windowing + activity filter
+├── run_morse_pipeline.py         # windowing + training + metrics
 ├── search_windowing_params.py    # hyperparameter search for windowing
 ├── inspect_trial_windows_v3.py   # QA visualisation (reads windows_index.csv)
 ├── train_cnn_4actions_simple.py  # classifier training

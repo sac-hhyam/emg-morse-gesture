@@ -184,7 +184,7 @@ def main():
         dropped = drop_stats[k]["dropped"]
         total   = kept + dropped
         rate    = kept / total if total > 0 else 0.0
-        bar     = "█" * int(rate * 20)
+        bar     = "#" * int(rate * 20)
         print(f"  {LABELS[k]:12s}: kept={kept:4d}  dropped={dropped:4d}"
               f"  keep_rate={rate:.0%}  {bar}")
     print("=" * 55)

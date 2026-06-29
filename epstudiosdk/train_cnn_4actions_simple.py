@@ -1,18 +1,27 @@
 # -*- coding: utf-8 -*-
-"""Train EMGCNN for 4 actions (up/down/left/right) from X_single_windows.npy."""
+"""Train EMGCNN from windowed EMG data and report held-out accuracy.
+
+The script reads X_single_windows.npy / y_single_labels.npy from one or more
+window directories. If gesture_to_id_single.csv exists, class names come from
+that file, so Morse labels such as rest/thumb/two_finger/fist stay consistent
+from windowing to training to realtime decoding.
+"""
 
 import argparse
+import csv
+import json
 from pathlib import Path
 
 import numpy as np
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
-CLASS_NAMES = ["up", "down", "left", "right"]  # y labels 0..3
+
+LEGACY_CLASS_NAMES = ["up", "down", "left", "right"]
 
 
 class EMGDataset(Dataset):
@@ -76,6 +85,136 @@ def compute_global_mean_std(X):
     return mean, std
 
 
+def read_label_map(data_dir: Path):
+    path = data_dir / "gesture_to_id_single.csv"
+    if not path.exists():
+        return {}
+    out = {}
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        for row in csv.reader(f):
+            if len(row) < 2:
+                continue
+            try:
+                out[int(row[1])] = str(row[0])
+            except ValueError:
+                continue
+    return out
+
+
+def read_window_groups(data_dir: Path, n_windows: int):
+    path = data_dir / "windows_index.csv"
+    if not path.exists():
+        return [f"{data_dir}:window:{i}" for i in range(n_windows)]
+
+    groups = []
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            keep = str(row.get("keep", "1")).strip()
+            if keep not in ("1", "1.0", "true", "True", "TRUE"):
+                continue
+            session = row.get("session_name") or data_dir.name
+            trial = row.get("trial_file") or row.get("trial_order") or "unknown_trial"
+            groups.append(f"{data_dir}:{session}:{trial}")
+
+    if len(groups) != n_windows:
+        print(f"[warn] {path} kept rows={len(groups)} but X has {n_windows}; using per-window groups.")
+        return [f"{data_dir}:window:{i}" for i in range(n_windows)]
+    return groups
+
+
+def load_window_data(data_dirs):
+    X_parts, y_parts, group_parts = [], [], []
+    label_map = {}
+    base_shape = None
+
+    for data_dir in data_dirs:
+        X_path = data_dir / "X_single_windows.npy"
+        y_path = data_dir / "y_single_labels.npy"
+        if not X_path.exists() or not y_path.exists():
+            raise FileNotFoundError(f"missing X/y window files in {data_dir}")
+
+        X = np.load(X_path)
+        y = np.load(y_path)
+        if X.ndim != 3:
+            raise ValueError(f"{X_path} must have shape [N,T,C], got {X.shape}")
+        if y.ndim != 1 or y.shape[0] != X.shape[0]:
+            raise ValueError(f"{y_path} must have shape [N] matching X, got {y.shape}")
+
+        shape_tc = X.shape[1:]
+        if base_shape is None:
+            base_shape = shape_tc
+        elif shape_tc != base_shape:
+            raise ValueError(f"{data_dir} has window shape {shape_tc}; expected {base_shape}")
+
+        label_map.update(read_label_map(data_dir))
+        X_parts.append(X.astype(np.float32))
+        y_parts.append(y.astype(np.int64))
+        group_parts.extend(read_window_groups(data_dir, X.shape[0]))
+
+    X_all = np.concatenate(X_parts, axis=0)
+    y_all = np.concatenate(y_parts, axis=0)
+    groups = np.asarray(group_parts, dtype=object)
+
+    max_label = int(y_all.max()) if y_all.size else -1
+    max_map = max(label_map.keys()) if label_map else -1
+    n_classes = max(max_label, max_map) + 1
+    if n_classes <= 0:
+        raise ValueError("no labels found")
+
+    class_names = []
+    for i in range(n_classes):
+        if i in label_map:
+            class_names.append(label_map[i])
+        elif i < len(LEGACY_CLASS_NAMES):
+            class_names.append(LEGACY_CLASS_NAMES[i])
+        else:
+            class_names.append(f"class_{i}")
+
+    return X_all, y_all, groups, class_names
+
+
+def can_stratify(y):
+    if y.size == 0:
+        return False
+    _, counts = np.unique(y, return_counts=True)
+    return bool(np.all(counts >= 2))
+
+
+def has_all_classes(y, *splits):
+    classes = set(np.unique(y).tolist())
+    if not classes:
+        return False
+    for split in splits:
+        if set(np.unique(y[split]).tolist()) != classes:
+            return False
+    return True
+
+
+def split_indices(y, groups, use_group_split=True, seed=42):
+    idx = np.arange(y.shape[0])
+    unique_groups = np.unique(groups)
+
+    if use_group_split and unique_groups.size >= 3:
+        splitter = GroupShuffleSplit(n_splits=1, test_size=0.30, random_state=seed)
+        train_idx, temp_idx = next(splitter.split(idx, y, groups))
+        temp_groups = groups[temp_idx]
+        if np.unique(temp_groups).size >= 2:
+            splitter2 = GroupShuffleSplit(n_splits=1, test_size=0.50, random_state=seed + 1)
+            rel_val_idx, rel_test_idx = next(splitter2.split(temp_idx, y[temp_idx], temp_groups))
+            val_idx = temp_idx[rel_val_idx]
+            test_idx = temp_idx[rel_test_idx]
+            if has_all_classes(y, train_idx, val_idx, test_idx):
+                return train_idx, val_idx, test_idx, "group"
+            print("[warn] group split missed at least one class in train/val/test; falling back to random split.")
+        print("[warn] not enough held-out groups for val/test split; falling back to random split.")
+
+    strat = y if can_stratify(y) else None
+    train_idx, temp_idx = train_test_split(idx, test_size=0.30, random_state=seed, stratify=strat)
+    strat_temp = y[temp_idx] if can_stratify(y[temp_idx]) else None
+    val_idx, test_idx = train_test_split(temp_idx, test_size=0.50, random_state=seed, stratify=strat_temp)
+    return train_idx, val_idx, test_idx, "random"
+
+
 @torch.no_grad()
 def eval_model(model, loader, device, criterion):
     model.eval()
@@ -91,27 +230,63 @@ def eval_model(model, loader, device, criterion):
         pred = logits.argmax(dim=1)
         correct += (pred == yb).sum().item()
         total += yb.size(0)
-    return loss_sum / total, correct / total
+    return loss_sum / max(total, 1), correct / max(total, 1)
+
+
+def predict_all(model, loader, device):
+    model.eval()
+    all_p, all_t = [], []
+    with torch.no_grad():
+        for xb, yb in loader:
+            xb = xb.to(device)
+            logits = model(xb)
+            all_p.append(logits.argmax(dim=1).cpu().numpy())
+            all_t.append(yb.numpy())
+    return np.concatenate(all_t), np.concatenate(all_p)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data_dir", type=str, required=True)
-    ap.add_argument("--ckpt", type=str, default="cnn_4actions_updownleftright.pth")
+    ap.add_argument("--data_dir", type=str, default=None,
+                    help="single window directory; kept for backward compatibility")
+    ap.add_argument("--data_dirs", type=str, nargs="+", default=None,
+                    help="one or more directories containing X_single_windows.npy/y_single_labels.npy")
+    ap.add_argument("--ckpt", type=str, default="cnn_emg.pth")
+    ap.add_argument("--metrics_json", type=str, default=None,
+                    help="where to write accuracy/report JSON; default is <ckpt>.metrics.json")
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--patience", type=int, default=8)
+    ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--per_window_norm", action="store_true", default=True)
+    ap.add_argument("--no_group_split", action="store_true",
+                    help="use random window split instead of trial/session group split")
     args = ap.parse_args()
 
-    data_dir = Path(args.data_dir)
-    X = np.load(data_dir / "X_single_windows.npy")
-    y = np.load(data_dir / "y_single_labels.npy")
-    print("X:", X.shape, "y:", y.shape)
+    if args.data_dirs:
+        data_dirs = [Path(p) for p in args.data_dirs]
+    elif args.data_dir:
+        data_dirs = [Path(args.data_dir)]
+    else:
+        raise ValueError("pass --data_dir or --data_dirs")
 
-    X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
-    X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42, stratify=y_temp)
+    X, y, groups, class_names = load_window_data(data_dirs)
+    n_classes = len(class_names)
+    if np.any(y < 0) or np.any(y >= n_classes):
+        raise ValueError(f"labels must be in [0,{n_classes - 1}], got min={y.min()} max={y.max()}")
+
+    print("X:", X.shape, "y:", y.shape)
+    print("classes:", {i: name for i, name in enumerate(class_names)})
+
+    train_idx, val_idx, test_idx, split_mode = split_indices(
+        y, groups, use_group_split=not args.no_group_split, seed=args.seed
+    )
+    print(f"split_mode={split_mode} train={len(train_idx)} val={len(val_idx)} test={len(test_idx)}")
+
+    X_train, y_train = X[train_idx], y[train_idx]
+    X_val, y_val = X[val_idx], y[val_idx]
+    X_test, y_test = X[test_idx], y[test_idx]
 
     mean, std = compute_global_mean_std(X_train)
 
@@ -124,16 +299,18 @@ def main():
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, drop_last=False)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = EMGCNN(n_channels=X.shape[2], n_classes=4).to(device)
+    model = EMGCNN(n_channels=X.shape[2], n_classes=n_classes).to(device)
 
-    counts = np.bincount(y_train, minlength=4)
-    weights = len(y_train) / (4 * np.maximum(counts, 1))
+    counts = np.bincount(y_train, minlength=n_classes)
+    weights = len(y_train) / (n_classes * np.maximum(counts, 1))
     criterion = nn.CrossEntropyLoss(weight=torch.tensor(weights, dtype=torch.float32, device=device))
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-    best_val = 0.0
+    best_val = -1.0
     best_state = None
+    best_epoch = 0
     no_imp = 0
+    history = []
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -153,13 +330,24 @@ def main():
             corr += (pred == yb).sum().item()
             tot += yb.size(0)
 
-        train_loss = loss_sum / tot
-        train_acc = corr / tot
+        train_loss = loss_sum / max(tot, 1)
+        train_acc = corr / max(tot, 1)
         val_loss, val_acc = eval_model(model, val_loader, device, criterion)
-        print(f"Epoch {epoch:02d}: train_loss={train_loss:.4f} train_acc={train_acc:.3f} val_loss={val_loss:.4f} val_acc={val_acc:.3f}")
+        history.append({
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "train_acc": train_acc,
+            "val_loss": val_loss,
+            "val_acc": val_acc,
+        })
+        print(
+            f"Epoch {epoch:02d}: train_loss={train_loss:.4f} train_acc={train_acc:.3f} "
+            f"val_loss={val_loss:.4f} val_acc={val_acc:.3f}"
+        )
 
         if val_acc > best_val:
             best_val = val_acc
+            best_epoch = epoch
             best_state = {k: v.cpu() for k, v in model.state_dict().items()}
             no_imp = 0
         else:
@@ -171,32 +359,64 @@ def main():
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    model.eval()
-    all_p = []
-    all_t = []
-    with torch.no_grad():
-        for xb, yb in test_loader:
-            xb = xb.to(device)
-            logits = model(xb)
-            p = logits.argmax(dim=1).cpu().numpy()
-            all_p.append(p)
-            all_t.append(yb.numpy())
+    y_true, y_pred = predict_all(model, test_loader, device)
+    test_acc = float((y_pred == y_true).mean())
+    labels = list(range(n_classes))
+    report_text = classification_report(
+        y_true, y_pred, labels=labels, target_names=class_names, digits=3, zero_division=0
+    )
+    report_dict = classification_report(
+        y_true, y_pred, labels=labels, target_names=class_names, digits=6,
+        output_dict=True, zero_division=0
+    )
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
 
-    y_pred = np.concatenate(all_p)
-    y_true = np.concatenate(all_t)
-    print("test_acc:", (y_pred == y_true).mean())
-    print(classification_report(y_true, y_pred, target_names=CLASS_NAMES, digits=3))
-    print("confusion_matrix:\n", confusion_matrix(y_true, y_pred))
+    print("test_acc:", test_acc)
+    print(report_text)
+    print("confusion_matrix:\n", cm)
 
     ckpt_path = Path(args.ckpt)
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+    class_names_lower = [str(x).lower() for x in class_names]
+    label_offset = 0 if class_names_lower and class_names_lower[0] == "rest" else 1
     torch.save({
         "model_state_dict": model.state_dict(),
         "mean": mean,
         "std": std,
         "per_window_norm": bool(args.per_window_norm),
-        "class_names": CLASS_NAMES,
+        "class_names": class_names,
+        "label_offset": int(label_offset),
+        "split_mode": split_mode,
+        "best_epoch": int(best_epoch),
+        "best_val_acc": float(best_val),
+        "test_acc": test_acc,
     }, ckpt_path)
     print("[OK] saved ckpt:", ckpt_path)
+
+    metrics_path = Path(args.metrics_json) if args.metrics_json else ckpt_path.with_suffix(".metrics.json")
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics = {
+        "data_dirs": [str(p) for p in data_dirs],
+        "ckpt": str(ckpt_path),
+        "class_names": class_names,
+        "split_mode": split_mode,
+        "n_windows": int(X.shape[0]),
+        "window_shape": list(X.shape[1:]),
+        "splits": {
+            "train": int(len(train_idx)),
+            "val": int(len(val_idx)),
+            "test": int(len(test_idx)),
+        },
+        "best_epoch": int(best_epoch),
+        "best_val_acc": float(best_val),
+        "test_acc": test_acc,
+        "confusion_matrix": cm.astype(int).tolist(),
+        "classification_report": report_dict,
+        "history": history,
+    }
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2)
+    print("[OK] saved metrics:", metrics_path)
 
 
 if __name__ == "__main__":

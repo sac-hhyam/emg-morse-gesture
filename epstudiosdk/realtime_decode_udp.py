@@ -112,8 +112,13 @@ def load_ckpt(ckpt_path: Path, n_channels: int):
     if std is not None:
         std = np.asarray(std, dtype=np.float32)
 
-    gesture_names = ["rest"] + class_names
-    return model, torch_device, mean, std, per_window_norm, gesture_names
+    inferred_offset = 0 if class_names and str(class_names[0]).lower() == "rest" else 1
+    label_offset = int(ckpt.get("label_offset", inferred_offset))
+    if label_offset == 0:
+        gesture_names = class_names
+    else:
+        gesture_names = ["rest"] + class_names
+    return model, torch_device, mean, std, per_window_norm, gesture_names, label_offset
 
 # ----------------- UDP 消息 / 事件平滑 -----------------
 @dataclass
@@ -1031,7 +1036,9 @@ def main():
         raise FileNotFoundError(str(ckpt_path))
 
     # ----------------- 模型加载 -----------------
-    model, torch_device, mean, std, per_window_norm, gesture_names = load_ckpt(ckpt_path, n_channels=n_channels)
+    model, torch_device, mean, std, per_window_norm, gesture_names, label_offset = load_ckpt(
+        ckpt_path, n_channels=n_channels
+    )
     softmax = torch.nn.Softmax(dim=1)
     decision_min_windows = int(args.decision_min_windows)
     if args.start_vote_len is not None and ("--decision_min_windows" not in os.sys.argv):
@@ -1048,7 +1055,7 @@ def main():
         decision_vote_ratio=float(args.decision_vote_ratio),
     )
 
-    print(f"[Model] device={torch_device}, per_window_norm={per_window_norm}")
+    print(f"[Model] device={torch_device}, per_window_norm={per_window_norm}, label_offset={label_offset}")
     print(f"[Classes] 0=rest, 1..={gesture_names[1:]}")
 
     # ----------------- UDP socket -----------------
@@ -1201,7 +1208,7 @@ def main():
                         prob = softmax(logits).detach().cpu().numpy()[0]
                         pred4 = int(np.argmax(prob))
                         conf = float(np.max(prob))
-                    pred_idx = pred4 + 1
+                    pred_idx = pred4 + label_offset
 
                 # event（先更新状态机，再决定 frame 发 raw 还是 stable）
                 evs = smoother.update(t=float(t_center), label=int(pred_idx), conf=float(conf))

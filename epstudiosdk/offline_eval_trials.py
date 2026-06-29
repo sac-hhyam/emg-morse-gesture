@@ -25,8 +25,8 @@ python offline_eval_trials.py --session_dir .\records\session_20260303_123456 --
 python offline_eval_trials.py --session_dir ... --ckpt ... --win_sec 0.20 --step_sec 0.05 --vote meanprob
 """
 
-import os
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -117,6 +117,7 @@ def main():
     ap.add_argument("--sfreq", type=float, default=1000.0, help="used only if --use_file_sfreq is False")
     ap.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
     ap.add_argument("--out_csv", type=str, default=None, help="output csv path; default in session_dir/eval_results.csv")
+    ap.add_argument("--out_json", type=str, default=None, help="summary JSON path; default in session_dir/eval_summary.json")
     ap.add_argument("--print_limit", type=int, default=200, help="max per-trial lines printed")
     args = ap.parse_args()
 
@@ -129,7 +130,7 @@ def main():
 
     # --- load ckpt ---
     map_location = "cpu"
-    ckpt = torch.load(str(ckpt_path), map_location=map_location)
+    ckpt = torch.load(str(ckpt_path), map_location=map_location, weights_only=False)
     state = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
     class_names = ckpt.get("class_names", DEFAULT_CLASS_NAMES) if isinstance(ckpt, dict) else DEFAULT_CLASS_NAMES
     n_classes = len(class_names)
@@ -304,6 +305,31 @@ def main():
         for r in rows:
             w.writerow(r)
     print("\n[OK] wrote:", out_csv)
+
+    out_json = Path(args.out_json) if args.out_json else session_dir / "eval_summary.json"
+    summary = {
+        "session_dir": str(session_dir),
+        "ckpt": str(ckpt_path),
+        "class_names": list(class_names),
+        "vote": args.vote,
+        "n_trials": int(y_true.size),
+        "accuracy": acc,
+        "confusion_matrix": cm.astype(int).tolist(),
+        "per_class": [
+            {
+                "id": int(k),
+                "name": class_names[k] if k < len(class_names) else str(k),
+                "precision": float(p),
+                "recall": float(r),
+                "f1": float(f1),
+                "support": int(sup),
+            }
+            for k, (p, r, f1, sup) in enumerate(prf)
+        ],
+    }
+    with open(out_json, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    print("[OK] wrote:", out_json)
 
 
 if __name__ == "__main__":

@@ -80,6 +80,7 @@ python epstudiosdk/build_windows_morse.py \
 
 ## Google Drive Folder Structure
 
+<<<<<<< Updated upstream
 ```
 emg-morse-gesture-data/
 ├── raw-edf/
@@ -138,6 +139,14 @@ epstudiosdk/records/
 | rest | — | — | Not yet recorded |
 
 ---
+=======
+| Session                      | Gesture           | Duration | Windows kept | Notes                                                 |
+| ---------------------------- | ----------------- | -------- | ------------ | ----------------------------------------------------- |
+| thumb-up-2026-06-27_171100   | thumb (DOT)       | 273s     | 1119         | Clean signal throughout                               |
+| two-finger-2026-06-27_171620 | two_finger (DASH) | 194s     | 796          | Electrode settling first 90s — use --skip_head_sec 90 |
+| fist-2026-06-27_171620       | fist (SPACE)      | 206s     | 872          | Clean signal throughout                               |
+| rest                         | rest              | —        | —            | Not yet recorded                                      |
+>>>>>>> Stashed changes
 
 ## Hardware Notes
 

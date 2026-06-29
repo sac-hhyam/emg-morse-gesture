@@ -20,6 +20,21 @@ class ConfigUtil(object):
     config data, dict type
     """
     _data = {}
+    _defaults = {
+        "host": "http://localhost",
+        "port": "8080",
+        "websocket_host": "ws://localhost",
+        "websocket_port": "9000",
+        "login_id": "admin",
+        "password": "admin",
+        "guinea_pig_id": "20220526",
+        "server_host": "0.0.0.0",
+        "server_port": "8088",
+        "device_mac": "00:00:00:00:00:00",
+        "channel": "1,2,3,4,5",
+        "channels": "1,2,3,4,5",
+        "display_points": "1000",
+    }
 
     @classmethod
     def _read_config_file(cls, path, required_section=True):
@@ -58,6 +73,8 @@ class ConfigUtil(object):
                             base_path = base_path_sdk
                     else:
                         base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+                    cls._data.update(cls._defaults)
+
                     default_path = os.path.join(base_path, "data", "config.ini")
                     if os.path.exists(default_path):
                         cls._read_config_file(default_path)
@@ -65,8 +82,6 @@ class ConfigUtil(object):
                         if is_temp:
                             msg = "Please package the epstudiosdk package or the data folder under epstudiosdk into the executable."
                             raise Exception(f"{msg}. sdk config file not found file path:{default_path}")
-                        else:
-                            raise Exception("sdk config file not found file path:{}".format(default_path))
 
                     custom_paths = []
                     if is_temp:
