@@ -55,6 +55,8 @@ def main():
     ap.add_argument("--rms_smooth_sec",      type=float, default=0.05)  # was 0.02
     ap.add_argument("--thr_q",               type=float, default=0.70)  # was 0.55
     ap.add_argument("--active_ratio_thresh", type=float, default=0.55)  # was 0.65
+    ap.add_argument("--rest_active_ratio_max", type=float, default=0.20,
+                    help="for label 0/rest, keep quiet windows with active_ratio <= this")
 
     ap.add_argument("--min_window_rms_q",    type=float, default=0.00)
     ap.add_argument("--write_index",         action="store_true", default=True)
@@ -124,7 +126,10 @@ def main():
         for i, st in enumerate(win_starts):
             act_ratio = float(active[st:st + win_len].mean())
             mean_r    = float(win_mean_rms[i])
-            keep      = (act_ratio >= args.active_ratio_thresh) and (mean_r >= win_rms_thr)
+            if lab == 0:
+                keep = act_ratio <= args.rest_active_ratio_max
+            else:
+                keep = (act_ratio >= args.active_ratio_thresh) and (mean_r >= win_rms_thr)
 
             if keep:
                 w = emg2[st:st + win_len, :]   # [win_len, C]

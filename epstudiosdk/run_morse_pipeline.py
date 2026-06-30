@@ -51,8 +51,20 @@ def main():
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--split_mode", choices=["time_block", "group", "random"], default="time_block",
+                    help="time_block is recommended for long sessions with overlapping windows")
+    ap.add_argument("--gap_windows", type=int, default=5,
+                    help="windows to drop between train/val/test blocks")
+    ap.add_argument("--train_frac", type=float, default=0.70)
+    ap.add_argument("--val_frac", type=float, default=0.15)
+    norm_group = ap.add_mutually_exclusive_group()
+    norm_group.add_argument("--global_norm", dest="per_window_norm", action="store_false",
+                            help="fit mean/std on train set only, then apply to train/val/test (default)")
+    norm_group.add_argument("--per_window_norm", dest="per_window_norm", action="store_true",
+                            help="normalize each window by its own mean/std")
+    ap.set_defaults(per_window_norm=False)
     ap.add_argument("--no_group_split", action="store_true",
-                    help="use random window split instead of trial/session group split")
+                    help="deprecated alias for --split_mode random")
     args = ap.parse_args()
 
     session_dirs = [Path(p) for p in args.session_dirs]
@@ -92,9 +104,12 @@ def main():
         "--batch_size", str(args.batch_size),
         "--lr", str(args.lr),
         "--seed", str(args.seed),
+        "--split_mode", "random" if args.no_group_split else str(args.split_mode),
+        "--gap_windows", str(args.gap_windows),
+        "--train_frac", str(args.train_frac),
+        "--val_frac", str(args.val_frac),
     ]
-    if args.no_group_split:
-        train_cmd.append("--no_group_split")
+    train_cmd.append("--per_window_norm" if args.per_window_norm else "--global_norm")
     run(train_cmd)
 
     print("\n[OK] pipeline complete")

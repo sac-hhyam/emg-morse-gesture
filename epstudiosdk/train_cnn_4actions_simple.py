@@ -122,8 +122,36 @@ def read_window_groups(data_dir: Path, n_windows: int):
     return groups
 
 
+def read_window_blocks(data_dir: Path, n_windows: int):
+    """Return one time-ordered block id per kept window.
+
+    For a single long recording, this is usually one block. For many trials in a
+    session folder, each trial becomes its own block. The returned order matches
+    X_single_windows.npy because build_windows_morse.py appends kept windows in
+    the same order it writes kept rows to windows_index.csv.
+    """
+    path = data_dir / "windows_index.csv"
+    if not path.exists():
+        return [f"{data_dir}:all"] * n_windows
+
+    blocks = []
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            keep = str(row.get("keep", "1")).strip()
+            if keep not in ("1", "1.0", "true", "True", "TRUE"):
+                continue
+            session = row.get("session_name") or data_dir.name
+            trial = row.get("trial_file") or row.get("trial_order") or "unknown_trial"
+            blocks.append(f"{data_dir}:{session}:{trial}")
+
+    if len(blocks) != n_windows:
+        print(f"[warn] {path} kept rows={len(blocks)} but X has {n_windows}; using one block for folder.")
+        return [f"{data_dir}:all"] * n_windows
+    return blocks
+
+
 def load_window_data(data_dirs):
-    X_parts, y_parts, group_parts = [], [], []
+    X_parts, y_parts, group_parts, block_parts = [], [], [], []
     label_map = {}
     base_shape = None
 
@@ -150,10 +178,12 @@ def load_window_data(data_dirs):
         X_parts.append(X.astype(np.float32))
         y_parts.append(y.astype(np.int64))
         group_parts.extend(read_window_groups(data_dir, X.shape[0]))
+        block_parts.extend(read_window_blocks(data_dir, X.shape[0]))
 
     X_all = np.concatenate(X_parts, axis=0)
     y_all = np.concatenate(y_parts, axis=0)
     groups = np.asarray(group_parts, dtype=object)
+    blocks = np.asarray(block_parts, dtype=object)
 
     max_label = int(y_all.max()) if y_all.size else -1
     max_map = max(label_map.keys()) if label_map else -1
@@ -170,7 +200,7 @@ def load_window_data(data_dirs):
         else:
             class_names.append(f"class_{i}")
 
-    return X_all, y_all, groups, class_names
+    return X_all, y_all, groups, blocks, class_names
 
 
 def can_stratify(y):
@@ -213,6 +243,64 @@ def split_indices(y, groups, use_group_split=True, seed=42):
     strat_temp = y[temp_idx] if can_stratify(y[temp_idx]) else None
     val_idx, test_idx = train_test_split(temp_idx, test_size=0.50, random_state=seed, stratify=strat_temp)
     return train_idx, val_idx, test_idx, "random"
+
+
+def split_time_block_indices(y, blocks, train_frac=0.70, val_frac=0.15, gap_windows=5):
+    """Split each session/trial block by time order.
+
+    This prevents neighboring overlapped windows from being randomly separated
+    across train/val/test. gap_windows are discarded between adjacent splits.
+    """
+    train_parts, val_parts, test_parts = [], [], []
+    gap_windows = max(0, int(gap_windows))
+
+    for block in np.unique(blocks):
+        block_idx = np.flatnonzero(blocks == block)
+        n = int(block_idx.size)
+        if n < 3:
+            print(f"[warn] block {block} has only {n} windows; assigning all to train.")
+            train_parts.append(block_idx)
+            continue
+
+        train_end = int(np.floor(n * float(train_frac)))
+        val_end = int(np.floor(n * float(train_frac + val_frac)))
+
+        train_end = min(max(train_end, 1), n - 2)
+        val_start = min(train_end + gap_windows, n - 1)
+        val_end = min(max(val_end, val_start + 1), n - 1)
+        test_start = min(val_end + gap_windows, n)
+
+        train_idx = block_idx[:train_end]
+        val_idx = block_idx[val_start:val_end]
+        test_idx = block_idx[test_start:]
+
+        if train_idx.size:
+            train_parts.append(train_idx)
+        if val_idx.size:
+            val_parts.append(val_idx)
+        if test_idx.size:
+            test_parts.append(test_idx)
+
+        dropped = n - train_idx.size - val_idx.size - test_idx.size
+        if dropped > 0:
+            print(f"[split] block={block} windows={n} train={train_idx.size} val={val_idx.size} test={test_idx.size} gap_drop={dropped}")
+
+    if not train_parts or not val_parts or not test_parts:
+        raise ValueError("time_block split produced an empty train/val/test set; collect more data or lower gap_windows")
+
+    train_idx = np.concatenate(train_parts)
+    val_idx = np.concatenate(val_parts)
+    test_idx = np.concatenate(test_parts)
+
+    train_classes = set(np.unique(y[train_idx]).tolist())
+    val_classes = set(np.unique(y[val_idx]).tolist())
+    test_classes = set(np.unique(y[test_idx]).tolist())
+    present_classes = set(np.unique(y).tolist())
+    if train_classes != present_classes or val_classes != present_classes or test_classes != present_classes:
+        print("[warn] time_block split does not contain every present class in train/val/test.")
+        print(f"       present={sorted(present_classes)} train={sorted(train_classes)} val={sorted(val_classes)} test={sorted(test_classes)}")
+
+    return train_idx, val_idx, test_idx, "time_block"
 
 
 @torch.no_grad()
@@ -259,9 +347,20 @@ def main():
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--patience", type=int, default=8)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--per_window_norm", action="store_true", default=True)
+    norm_group = ap.add_mutually_exclusive_group()
+    norm_group.add_argument("--global_norm", dest="per_window_norm", action="store_false",
+                            help="fit mean/std on train set only, then apply to train/val/test (default)")
+    norm_group.add_argument("--per_window_norm", dest="per_window_norm", action="store_true",
+                            help="normalize each window by its own mean/std")
+    ap.set_defaults(per_window_norm=False)
+    ap.add_argument("--split_mode", choices=["time_block", "group", "random"], default="time_block",
+                    help="time_block prevents overlap leakage for long sessions; random is for debugging only")
+    ap.add_argument("--gap_windows", type=int, default=5,
+                    help="windows to drop between train/val/test blocks to avoid overlap leakage")
+    ap.add_argument("--train_frac", type=float, default=0.70)
+    ap.add_argument("--val_frac", type=float, default=0.15)
     ap.add_argument("--no_group_split", action="store_true",
-                    help="use random window split instead of trial/session group split")
+                    help="deprecated alias for --split_mode random")
     args = ap.parse_args()
 
     if args.data_dirs:
@@ -271,7 +370,10 @@ def main():
     else:
         raise ValueError("pass --data_dir or --data_dirs")
 
-    X, y, groups, class_names = load_window_data(data_dirs)
+    if args.no_group_split:
+        args.split_mode = "random"
+
+    X, y, groups, blocks, class_names = load_window_data(data_dirs)
     n_classes = len(class_names)
     if np.any(y < 0) or np.any(y >= n_classes):
         raise ValueError(f"labels must be in [0,{n_classes - 1}], got min={y.min()} max={y.max()}")
@@ -279,9 +381,22 @@ def main():
     print("X:", X.shape, "y:", y.shape)
     print("classes:", {i: name for i, name in enumerate(class_names)})
 
-    train_idx, val_idx, test_idx, split_mode = split_indices(
-        y, groups, use_group_split=not args.no_group_split, seed=args.seed
-    )
+    if args.split_mode == "time_block":
+        train_idx, val_idx, test_idx, split_mode = split_time_block_indices(
+            y,
+            blocks,
+            train_frac=args.train_frac,
+            val_frac=args.val_frac,
+            gap_windows=args.gap_windows,
+        )
+    elif args.split_mode == "group":
+        train_idx, val_idx, test_idx, split_mode = split_indices(
+            y, groups, use_group_split=True, seed=args.seed
+        )
+    else:
+        train_idx, val_idx, test_idx, split_mode = split_indices(
+            y, groups, use_group_split=False, seed=args.seed
+        )
     print(f"split_mode={split_mode} train={len(train_idx)} val={len(val_idx)} test={len(test_idx)}")
 
     X_train, y_train = X[train_idx], y[train_idx]
@@ -406,6 +521,12 @@ def main():
             "train": int(len(train_idx)),
             "val": int(len(val_idx)),
             "test": int(len(test_idx)),
+        },
+        "split_params": {
+            "split_mode": split_mode,
+            "train_frac": float(args.train_frac),
+            "val_frac": float(args.val_frac),
+            "gap_windows": int(args.gap_windows),
         },
         "best_epoch": int(best_epoch),
         "best_val_acc": float(best_val),
