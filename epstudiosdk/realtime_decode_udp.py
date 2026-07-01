@@ -507,8 +507,9 @@ class DecodeDashboard:
         gesture_names: List[str],
         display_seconds: float = 5.0,
         refresh_hz: float = 20.0,
-        gain: float = 1e6,
+        gain: float = 1.0,
         step_sec: float = 0.05,
+        channel_range_uv: float = 2000.0,
     ):
         if plt is None:
             raise RuntimeError("matplotlib import failed")
@@ -521,6 +522,8 @@ class DecodeDashboard:
         self.refresh_hz = float(refresh_hz)
         self.gain = float(gain)
         self.step_sec = float(step_sec)
+        self.channel_range_uv = float(channel_range_uv)
+        self.wave_offsets = np.arange(self.n_channels, dtype=np.float32) * self.channel_range_uv
 
         self.max_samples = max(1, int(round(self.sfreq * self.display_seconds)))
         self.max_steps = max(8, int(np.ceil(self.display_seconds / self.step_sec)) + 2)
@@ -575,6 +578,12 @@ class DecodeDashboard:
         self.ax_wave.set_ylabel("Channels (stacked)")
         self.ax_wave.grid(True, alpha=0.25)
         self.ax_wave.set_xlim(-self.display_seconds, 0.0)
+        self.ax_wave.set_ylim(
+            -self.channel_range_uv / 2.0,
+            self.wave_offsets[-1] + self.channel_range_uv / 2.0 if self.n_channels > 0 else self.channel_range_uv,
+        )
+        self.ax_wave.set_yticks(self.wave_offsets)
+        self.ax_wave.set_yticklabels([f"ch{ch}" for ch in self.channels])
 
         # label timeline
         palette = [
@@ -604,6 +613,7 @@ class DecodeDashboard:
             origin="lower",
         )
         self.ax_label.set_ylim(0.0, 2.0)
+        self.ax_label.set_xlim(-self.display_seconds, 0.0)
         self.ax_label.set_yticks([0.5, 1.5])
         self.ax_label.set_yticklabels(["Frame", "Stable"])
         self.ax_label.set_xlabel("Time (s)")
@@ -691,19 +701,8 @@ class DecodeDashboard:
             n = data.shape[0]
             x = np.linspace(-n / self.sfreq, 0.0, n, endpoint=False)
 
-            ch_std = np.std(data, axis=0)
-            positive_std = ch_std[ch_std > 0]
-            base = float(np.median(positive_std)) if positive_std.size > 0 else 1.0
-            spacing = max(base * 7.0, 1.0)
-            offsets = np.arange(self.n_channels, dtype=np.float32) * spacing
-
             for i, line in enumerate(self.lines):
-                line.set_data(x, data[:, i] + offsets[i])
-
-            self.ax_wave.set_xlim(-self.display_seconds, 0.0)
-            self.ax_wave.set_ylim(-spacing, offsets[-1] + spacing * 2.0 if self.n_channels > 0 else spacing)
-            self.ax_wave.set_yticks(offsets)
-            self.ax_wave.set_yticklabels([f"ch{ch}" for ch in self.channels])
+                line.set_data(x, data[:, i] + self.wave_offsets[i])
 
         wave_status = (
             f"gain={self.gain:g} | gate={'READY' if self.latest_gate_ready else 'CALIBRATING'}"
@@ -720,8 +719,6 @@ class DecodeDashboard:
 
         img = np.vstack([pred_arr, stable_arr])
         self.label_img.set_data(img)
-        self.label_img.set_extent([-self.max_steps * self.step_sec, 0.0, 0.0, 2.0])
-        self.ax_label.set_xlim(-self.display_seconds, 0.0)
 
         self.big_label.set_text(f"Stable: {self.latest_stable_name}")
         self.small_label.set_text(
@@ -744,7 +741,6 @@ class DecodeDashboard:
         try:
             self.fig.canvas.draw_idle()
             self.fig.canvas.flush_events()
-            plt.pause(0.001)
         except Exception:
             self.closed = True
 
@@ -778,6 +774,7 @@ class OnlineGate:
         self.high_th: Optional[float] = None
         self.low_th: Optional[float] = None
         self.active = False
+        self.last_rms: float = 0.0
 
     def thresholds_ready(self) -> bool:
         return self.high_th is not None and self.low_th is not None
@@ -812,6 +809,8 @@ class OnlineGate:
             self.tail = ext[-(self.rms_win - 1) :]
 
         rms = np.sqrt(np.maximum(power_smooth, 1e-12)).astype(np.float32)
+        if rms.size > 0:
+            self.last_rms = float(rms[-1])
 
         # 标定阶段：收集 rms
         if not self.thresholds_ready():
@@ -881,11 +880,18 @@ class BlockEvent(EventMessage):
 
             block = np.stack([np.asarray(v[:min_len], dtype=np.float32) for v in vals], axis=1)  # [L,C]
 
-            # 避免队列无限堆积：满了就丢包（实时优先）
+            # 避免队列无限堆积：满了就丢最旧的一块，保留最新数据（真正的实时优先）
             try:
                 self.block_q.put_nowait(block)
             except queue.Full:
-                pass
+                try:
+                    self.block_q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self.block_q.put_nowait(block)
+                except queue.Full:
+                    pass
 
 
 def main():
@@ -911,8 +917,8 @@ def main():
     ap.add_argument("--ckpt", type=str, required=True, help="cnn_4actions_merged_perwin.pth")
 
     # 滑窗与门控
-    ap.add_argument("--win_sec", type=float, default=0.20)
-    ap.add_argument("--step_sec", type=float, default=0.05)
+    ap.add_argument("--win_sec", type=float, default=0.50)
+    ap.add_argument("--step_sec", type=float, default=0.10)
     ap.add_argument("--active_ratio_thresh", type=float, default=0.6)
 
     ap.add_argument("--rms_win_sec", type=float, default=0.05)
@@ -923,7 +929,7 @@ def main():
     ap.add_argument("--calib_sec", type=float, default=5.0, help="开始几秒用于估计 RMS 阈值")
 
     # 事件平滑（v3：一段一标签，不允许 action->action 直接切换）
-    ap.add_argument("--min_rest_sec", type=float, default=0.10,
+    ap.add_argument("--min_rest_sec", type=float, default=0.50,
                     help="动作结束判定需要连续 rest 的最短时长")
     ap.add_argument("--conf_thresh", type=float, default=0.55,
                     help="低于该置信度的非零类别按 rest 处理")
@@ -947,7 +953,7 @@ def main():
     ap.add_argument("--port_udp", type=int, default=5005)
 
     # 其它
-    ap.add_argument("--queue_max", type=int, default=50, help="WebSocket->分类线程的 block 队列长度")
+    ap.add_argument("--queue_max", type=int, default=10, help="WebSocket->分类线程的 block 队列长度")
     ap.add_argument("--ring_sec", type=float, default=10.0, help="ring buffer 保存的秒数")
     ap.add_argument("--scale", type=float, default=1.0, help="对输入幅值整体缩放（调单位用）")
     ap.add_argument("--debug", action="store_true")
@@ -966,8 +972,10 @@ def main():
                     help="窗口中显示最近多少秒数据")
     ap.add_argument("--refresh_hz", type=float, default=20.0,
                     help="界面刷新频率")
-    ap.add_argument("--plot_gain", type=float, default=1e6,
-                    help="仅用于显示的幅值放大倍数")
+    ap.add_argument("--plot_gain", type=float, default=1.0,
+                    help="仅用于显示的幅值放大倍数（WebSocket 原始值已是 µV，默认不再换算）")
+    ap.add_argument("--channel_range_uv", type=float, default=2000.0,
+                    help="每个通道固定显示范围（µV，峰峰值），用于波形堆叠间距和 y 轴范围，不随信号方差自动缩放")
 
     args = ap.parse_args()
 
@@ -1100,6 +1108,7 @@ def main():
                     refresh_hz=args.refresh_hz,
                     gain=args.plot_gain,
                     step_sec=args.step_sec,
+                    channel_range_uv=args.channel_range_uv,
                 )
                 print("[UI] realtime dashboard enabled")
             except Exception as e:
@@ -1239,6 +1248,7 @@ def main():
                     )
 
                 if args.debug:
+                    print(f"[gate] ready={gate.thresholds_ready()} active={gate.active} last_rms={gate.last_rms:.3e} high_th={gate.high_th} low_th={gate.low_th}")
                     print(f"[frame] t={t_center:.2f} label={pred_idx} name={gesture_names[pred_idx]} conf={conf:.2f} active_ratio={active_ratio:.2f}")
                     if len(evs) > 0:
                         for ev in evs:
