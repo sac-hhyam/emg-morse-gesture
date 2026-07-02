@@ -35,13 +35,11 @@ import numpy as np
 
 # Keep this in sync with build_windows_from_trials.py's LABELS dict.
 LABELS = {
-    0: "rest",
-    1: "thumb",       # dot
-    2: "two_finger",  # dash
-    3: "fist",        # space
+    1: "down",
+    2: "tapping",
+    3: "fist",
 }
 NAME_TO_ID = {v: k for k, v in LABELS.items()}
-NAME_TO_ID["tapping"] = 2   # alias: tapping == two_finger (label_id 2)
 
 
 def _read_edf_header(f):

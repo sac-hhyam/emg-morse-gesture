@@ -1,0 +1,91 @@
+{
+  "test_dirs": [
+    "epstudiosdk/records/npz-output/tae/tae-down-test-01",
+    "epstudiosdk/records/npz-output/tae/tae-tapping-test-01",
+    "epstudiosdk/records/npz-output/tae/tae-fist-test-01"
+  ],
+  "data_dirs": [
+    "epstudiosdk/records/npz-output/tae/tae-down-01",
+    "epstudiosdk/records/npz-output/tae/tae-down-02",
+    "epstudiosdk/records/npz-output/tae/tae-down-03",
+    "epstudiosdk/records/npz-output/tae/tae-tapping-01",
+    "epstudiosdk/records/npz-output/tae/tae-tapping-02",
+    "epstudiosdk/records/npz-output/tae/tae-tapping-03",
+    "epstudiosdk/records/npz-output/tae/tae-fist-01",
+    "epstudiosdk/records/npz-output/tae/tae-fist-02",
+    "epstudiosdk/records/npz-output/tae/tae-fist-03"
+  ],
+  "ckpt": "epstudiosdk/cnn_morse_held-out_v5.pth",
+  "class_names": [
+    "down",
+    "tapping",
+    "fist"
+  ],
+  "n_loso": 2303,
+  "loso_acc": 0.4763352149370386,
+  "macro_avg": {
+    "precision": 0.4906240452489991,
+    "recall": 0.46237774724856556,
+    "f1": 0.39368840559307755
+  },
+  "per_class": [
+    {
+      "id": 0,
+      "name": "down",
+      "precision": 0.4475920679886686,
+      "recall": 0.9987357774968394,
+      "f1": 0.6181533646322379,
+      "support": 791
+    },
+    {
+      "id": 1,
+      "name": "tapping",
+      "precision": 0.10869565217391304,
+      "recall": 0.0350140056022409,
+      "f1": 0.05296610169491525,
+      "support": 714
+    },
+    {
+      "id": 2,
+      "name": "fist",
+      "precision": 0.9155844155844156,
+      "recall": 0.3533834586466165,
+      "f1": 0.5099457504520796,
+      "support": 798
+    }
+  ],
+  "confusion_matrix": [
+    [
+      790,
+      1,
+      0
+    ],
+    [
+      663,
+      25,
+      26
+    ],
+    [
+      312,
+      204,
+      282
+    ]
+  ],
+  "per_session": [
+    {
+      "session": "tae-down-test-01",
+      "n": 791,
+      "acc": 0.9987357774968394
+    },
+    {
+      "session": "tae-tapping-test-01",
+      "n": 714,
+      "acc": 0.0350140056022409
+    },
+    {
+      "session": "tae-fist-test-01",
+      "n": 798,
+      "acc": 0.3533834586466165
+    }
+  ]
+}

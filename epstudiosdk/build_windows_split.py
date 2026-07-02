@@ -46,7 +46,7 @@ from pathlib import Path
 
 import numpy as np
 
-LABELS = {0: "rest", 1: "thumb", 2: "tapping", 3: "fist"}
+LABELS = {1: "down", 2: "tapping", 3: "fist"}
 
 
 def _smooth_ma(x: np.ndarray, k: int) -> np.ndarray:

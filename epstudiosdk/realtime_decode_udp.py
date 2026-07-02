@@ -963,6 +963,12 @@ def main():
     ap.add_argument("--frame_use_raw_label", dest="frame_use_stable_label", action="store_false",
                     help="UDP frame 改为发送模型原始逐窗 label")
 
+    # Web dashboard
+    ap.add_argument("--web_dashboard", action="store_true", default=False,
+                    help="启动 Flask+SocketIO 实时 Web 仪表盘")
+    ap.add_argument("--web_port", type=int, default=5050,
+                    help="Web 仪表盘监听端口（默认 5050）")
+
     # 实时可视化
     ap.add_argument("--show_plot", dest="show_plot", action="store_true", default=True,
                     help="显示实时波形 + 标签面板（默认开启）")
@@ -1094,6 +1100,16 @@ def main():
         calib_sec=args.calib_sec,
     )
 
+    morse_server = None
+    if args.web_dashboard:
+        try:
+            from epstudiosdk.morse_dashboard import MorseDashboardServer
+            morse_server = MorseDashboardServer(port=args.web_port, gesture_names=gesture_names)
+            morse_server.start()
+            print(f"[WEB] Morse dashboard → http://localhost:{args.web_port}")
+        except ImportError:
+            print("[WARN] flask / flask-socketio not installed — web dashboard disabled.")
+
     plotter = None
     if args.show_plot:
         if plt is None:
@@ -1223,6 +1239,9 @@ def main():
                 evs = smoother.update(t=float(t_center), label=int(pred_idx), conf=float(conf))
                 for ev in evs:
                     sock.sendto(json.dumps(ev.__dict__, ensure_ascii=False).encode("utf-8"), target)
+                if morse_server is not None:
+                    for ev in evs:
+                        morse_server.push(ev)
 
                 frame_label = int(smoother.cur_label) if args.frame_use_stable_label else int(pred_idx)
                 frame_conf = float(conf) if frame_label != 0 else 0.0
@@ -1230,6 +1249,8 @@ def main():
                 # frame
                 frame = FrameMsg("frame", float(t_center), frame_label, gesture_names[frame_label], frame_conf, float(active_ratio))
                 sock.sendto(json.dumps(frame.__dict__, ensure_ascii=False).encode("utf-8"), target)
+                if morse_server is not None:
+                    morse_server.push_frame(frame, gate.thresholds_ready())
 
                 if plotter is not None:
                     last_event_state = evs[-1].state if len(evs) > 0 else None
@@ -1263,6 +1284,8 @@ def main():
     except KeyboardInterrupt:
         print("\n[Exit] KeyboardInterrupt")
     finally:
+        if morse_server is not None:
+            morse_server.stop()
         try:
             collection.stop_collection()
         except Exception:
