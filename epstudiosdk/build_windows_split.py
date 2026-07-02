@@ -253,11 +253,15 @@ def main() -> None:
     np.save(out_dir / "X_test.npy",  X_test)
     np.save(out_dir / "y_test.npy",  y_test)
 
-    # gesture_to_id_single.csv — same format as build_windows_morse.py
+    # gesture_to_id_single.csv — only write labels present in the actual data
+    # so the training script doesn't create phantom classes with zero support
+    present_labels = set(y_train_all)
+    if y_test_all:
+        present_labels |= set(y_test_all)
     with open(out_dir / "gesture_to_id_single.csv", "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        for lab_id in sorted(LABELS):
-            w.writerow([LABELS[lab_id], lab_id])
+        for lab_id in sorted(present_labels):
+            w.writerow([LABELS.get(lab_id, f"class_{lab_id}"), lab_id])
 
     # split_index.csv — full per-window traceability (kept + dropped)
     if all_rows:

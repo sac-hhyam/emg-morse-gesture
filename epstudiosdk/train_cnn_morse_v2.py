@@ -280,14 +280,21 @@ def main() -> None:
     X_test      = np.concatenate(X_test_parts,  axis=0)
     y_test      = np.concatenate(y_test_parts,  axis=0)
 
-    # Build class_names from label_map + fallback
-    LEGACY = ["up", "down", "left", "right"]
-    max_label = max(int(y_all_train.max()),
-                    int(y_test.max()) if y_test.size else 0,
-                    max(label_map.keys()) if label_map else 0)
-    n_classes  = max_label + 1
-    class_names = [label_map.get(i, LEGACY[i] if i < len(LEGACY) else f"class_{i}")
-                   for i in range(n_classes)]
+    # Build class list from labels actually present in data — no gap-filling.
+    # This means if rest (label 0) is absent, we get a clean 3-class model
+    # (thumb, tapping, fist) rather than a 4-class model with a phantom rest head.
+    # Labels are remapped to contiguous 0-indexed indices for CrossEntropyLoss.
+    present_labels = sorted(
+        set(y_all_train.tolist()) | (set(y_test.tolist()) if y_test.size else set())
+    )
+    label_to_idx = {lab: idx for idx, lab in enumerate(present_labels)}
+    class_names  = [label_map.get(lab, f"class_{lab}") for lab in present_labels]
+    n_classes    = len(present_labels)
+
+    # Remap y arrays to 0-indexed before training/eval
+    y_all_train = np.array([label_to_idx[int(l)] for l in y_all_train], dtype=np.int64)
+    y_test      = np.array([label_to_idx.get(int(l), -1) for l in y_test],  dtype=np.int64)
+
     n_channels = int(X_all_train.shape[2])
 
     print(f"\nCombined   train={len(y_all_train)}  test={len(y_test)}")
@@ -413,10 +420,11 @@ def main() -> None:
 
     torch.save({
         "model_state_dict": model.state_dict(),
-        "mean":             mean,          # [1, 1, C] — same shape inference expects
-        "std":              std,           # [1, 1, C]
-        "per_window_norm":  False,         # always global norm in this script
-        "class_names":      class_names,
+        "mean":             mean,           # [1, 1, C] — same shape inference expects
+        "std":              std,            # [1, 1, C]
+        "per_window_norm":  False,          # always global norm in this script
+        "class_names":      class_names,    # e.g. ['thumb','tapping','fist'] — no phantom classes
+        "label_to_idx":     label_to_idx,   # e.g. {1:0, 2:1, 3:2} — original→model index
         "label_offset":     int(label_offset),
         "split":            "raw_signal_pre_split",
         "best_epoch":       int(best_epoch),
@@ -491,6 +499,9 @@ def main() -> None:
         X_loso = np.concatenate(X_loso_parts, axis=0)
         y_loso = np.concatenate(y_loso_parts, axis=0)
         loso_tags = np.array(loso_session_tags)
+
+        # Remap LOSO labels using the same mapping fitted on training data
+        y_loso = np.array([label_to_idx.get(int(l), -1) for l in y_loso], dtype=np.int64)
 
         # Apply the TRAINING scaler — no new statistics from held-out data
         loso_ds     = EMGDataset(X_loso, y_loso, mean, std)
