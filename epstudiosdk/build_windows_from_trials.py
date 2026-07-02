@@ -43,7 +43,7 @@ import pandas as pd
 LABELS = {
     0: "rest",
     1: "thumb",       # dot
-    2: "two_finger",  # dash
+    2: "tapping",     # dash
     3: "fist",        # space
 }
 

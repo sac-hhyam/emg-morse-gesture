@@ -41,6 +41,7 @@ LABELS = {
     3: "fist",        # space
 }
 NAME_TO_ID = {v: k for k, v in LABELS.items()}
+NAME_TO_ID["tapping"] = 2   # alias: tapping == two_finger (label_id 2)
 
 
 def _read_edf_header(f):

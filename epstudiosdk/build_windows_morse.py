@@ -25,7 +25,7 @@ import pandas as pd
 LABELS = {
     0: "rest",
     1: "thumb",       # morse: dot
-    2: "two_finger",  # morse: dash
+    2: "tapping",     # morse: dash
     3: "fist",        # morse: space
 }
 
